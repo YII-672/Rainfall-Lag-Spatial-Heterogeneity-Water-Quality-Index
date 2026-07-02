@@ -1,0 +1,1489 @@
+---
+title: "Final"
+output: html_document
+date: "2026-07-01"
+---
+
+```{r setup, include=FALSE}
+# =====================================================
+# STEP 0 — Load Required Packages
+# =====================================================
+
+## Data processing
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(zoo)
+
+## Spatial analysis
+library(geosphere)
+
+## Visualization
+library(ggplot2)
+library(ggrepel)
+library(reshape2)
+library(corrplot)
+
+## Clustering
+library(factoextra)
+
+## Machine learning
+library(caret)
+library(randomForest)
+library(e1071)
+library(nnet)
+library(Metrics)
+
+## SHAP analysis
+library(kernelshap)
+library(shapviz)
+```
+
+# 4.1.1
+```{r}
+# =====================================================
+# 4.1.1 Monitoring Station Selection
+# =====================================================
+
+# STEP 1 — Load Monitoring Station Coordinates
+
+station_loc <- read_excel(
+  "C:/Users/1/Desktop/Station Location.xlsx"
+) %>%
+  rename(
+    Station = Station_ID, Lat = Latitude, Lon = Longitude
+  )
+
+# PJ meteorological station coordinates
+pj_lat <- 3.1
+pj_lon <- 101.65
+
+
+# STEP 2 — Calculate Distance from Each Monitoring Station to the PJ Meteorological Station
+
+station_loc <- station_loc %>%
+  rowwise() %>%
+  mutate(
+    Distance_km = distHaversine(
+      c(Lon, Lat),
+      c(pj_lon, pj_lat)
+    ) / 1000
+  ) %>%
+  ungroup()
+
+# STEP 3 — Select Monitoring Stations within a 20 km Radius
+
+selected_stations <- station_loc %>%
+  filter(Distance_km <= 20) %>%
+  rename(
+    `Distance to PJ (km)` = Distance_km
+  )
+
+head(selected_stations)
+
+# STEP 4 — Export Selected Monitoring Stations
+
+write.csv(
+  selected_stations,
+  "C:/Users/1/Desktop/Selected_Stations_20km.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 1 — Interactive Map of Selected Monitoring Stations
+# =====================================================
+
+# STEP 5 — Load Interactive Mapping Package
+library(leaflet)
+
+# STEP 6 — Create Station Selection Indicator
+station_map <- station_loc
+
+station_map$Selection <- ifelse(
+  station_map$Station %in% selected_stations$Station,
+  "Selected",
+  "Not Selected"
+)
+
+# STEP 7 — Convert Selection Variable to Factor
+station_map$Selection <- as.factor(station_map$Selection)
+
+# STEP 8 — Define Color Palette for Station Classification
+colors <- c("#1E3A8A", "#DC2626")
+
+pal <- colorFactor(
+  palette = colors,
+  domain = station_map$Selection
+)
+
+# STEP 9 — Generate Interactive Monitoring Station Map
+map <- leaflet(station_map) %>%
+  
+  addTiles() %>%
+  
+  addCircleMarkers(
+    
+    lng = ~Lon,
+    lat = ~Lat,
+    
+    color = ~pal(Selection),
+    fillColor = ~pal(Selection),
+    
+    fillOpacity = 0.8,
+    radius = 7,
+    weight = 1,
+    
+    popup = ~paste(
+      "<b>Station ID:</b>", Station, "<br>",
+      "<b>Selection:</b>", Selection, "<br>",
+      "<b>Distance to PJ (km):</b>",
+      round(Distance_km, 2)
+    )
+  ) %>%
+  
+  addLegend(
+    pal = pal,
+    values = ~Selection,
+    title = "Station Selection",
+    position = "bottomright"
+  )
+
+# STEP 10 — Display Interactive Map
+map
+```
+
+# 4.1.2
+```{r}
+# =====================================================
+# 4.1.2 Temperature Data Processing
+# =====================================================
+
+# STEP 1 — Import Daily Temperature Data
+
+temp_raw <- read_excel(
+  "C:/Users/1/Desktop/PJ Daily Temp 2018-2024.10.xls"
+)
+
+# STEP 2 — Construct Date Variable and Clean Temperature Data
+
+temp_daily <- temp_raw %>%
+  mutate(
+    Date = as.Date(
+      ISOdate(Year, Month, Day)
+    ),
+    # Treat negative temperature values as missing
+    Temperature = ifelse(
+      Temperature < 0,
+      NA,
+      Temperature
+    )
+  ) %>%
+  arrange(Date)
+
+# STEP 3 — Impute Missing Temperature Values
+
+temp_daily <- temp_daily %>%
+  mutate(
+    # Linear interpolation
+    Temp_t = na.approx(Temperature, na.rm = FALSE
+    )
+  ) %>%
+  # Forward fill remaining missing values
+  mutate(
+    Temp_t = na.locf(
+      Temp_t,
+      na.rm = FALSE
+    )
+  ) %>%
+  # Backward fill remaining missing values
+  mutate(
+    Temp_t = na.locf(
+      Temp_t, fromLast = TRUE
+    )
+  )
+
+# STEP 4 — Calculate 60-Day Moving Average Temperature (TM60)
+
+temp_daily <- temp_daily %>%
+  mutate(
+    TM60 = rollapplyr(
+      Temp_t, width = 61, FUN = mean, fill = NA,
+      partial = TRUE
+    )
+  )
+
+# STEP 5 — Export Temperature Features
+
+write.csv(
+  temp_daily,
+  "C:/Users/1/Desktop/Temperature_Features.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 2 — Temperature Exploratory Analysis
+# =====================================================
+
+# STEP 6 — Daily Temperature Time Series
+
+ggplot(temp_daily, aes(x = Date, y = Temp_t)) +
+  geom_line() +
+  labs(
+    title = "Daily Temperature Series",
+    x = "Date",
+    y = "Temperature (°C)"
+  )
+
+# STEP 7 — Prepare Data for Temperature Distribution Comparison
+
+temp_long <- temp_daily %>%
+  select(
+    TM60, Temp_t
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Type",
+    values_to = "Temperature"
+  )
+
+# STEP 8 — Temperature Distribution Comparison
+
+ggplot(temp_long, aes(x = Temperature, fill = Type)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Temperature Distribution Comparison",
+    x = "Temperature (°C)",
+    y = "Density",
+    fill = "Variable"
+  )
+```
+
+# 4.1.3
+```{r}
+# =====================================================
+# 4.1.3 Rainfall Data Processing
+# =====================================================
+
+# STEP 1 — Read Rainfall Data
+
+rain_raw <- read_excel(
+  "C:/Users/1/Desktop/PJ Daily Rainfall 2015-2024.10.xls"
+)
+
+# STEP 2 — Construct Date Variable and Clean Rainfall Data
+
+rain_daily <- rain_raw %>%
+  mutate(
+    Date = as.Date(
+      ISOdate(Year, Month, Day)
+    ),
+    # Convert trace rainfall (-33.3) to small value
+    Rainfall = ifelse(
+      Rainfall == -33.3, 0.05, Rainfall
+    ),
+    # Treat missing rainfall (-1.1) as NA
+    Rainfall = ifelse(
+      Rainfall == -1.1, NA, Rainfall
+    )
+  ) %>%
+  arrange(Date)
+
+# STEP 3 — Impute Missing Rainfall Using Local Median
+
+rain_daily <- rain_daily %>%
+  mutate(
+    Rain_t = ifelse(
+      is.na(Rainfall),
+
+      rollapply(
+        Rainfall, width = 7, FUN = median, fill = NA,
+        align = "center", na.rm = TRUE
+      ),
+
+      Rainfall
+    )
+  )
+
+# STEP 4 — Generate Rainfall Lag Variables (0–14 Days)
+
+rain_daily <- rain_daily %>%
+  mutate(
+    lag0  = lag(Rain_t, 0),
+    lag1  = lag(Rain_t, 1),
+    lag2  = lag(Rain_t, 2),
+    lag3  = lag(Rain_t, 3),
+    lag4  = lag(Rain_t, 4),
+    lag5  = lag(Rain_t, 5),
+    lag6  = lag(Rain_t, 6),
+    lag7  = lag(Rain_t, 7),
+    lag8  = lag(Rain_t, 8),
+    lag9  = lag(Rain_t, 9),
+    lag10 = lag(Rain_t, 10),
+    lag11 = lag(Rain_t, 11),
+    lag12 = lag(Rain_t, 12),
+    lag13 = lag(Rain_t, 13),
+    lag14 = lag(Rain_t, 14)
+  )
+
+# STEP 5 — Export Rainfall Features
+
+write.csv(
+  rain_daily,
+  "C:/Users/1/Desktop/Rainfall_Features.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 3 — Rainfall Exploratory Analysis
+# =====================================================
+
+# STEP 6 — Daily Rainfall Time Series
+
+ggplot(rain_daily, aes(x = Date, y = Rain_t)) +
+  geom_line() +
+  labs(
+    title = "Daily Rainfall Series",
+    x = "Date",
+    y = "Rainfall (mm)"
+  )
+
+# STEP 7 — Prepare Rainfall Lag Data for Distribution Analysis
+
+rain_density_df <- rain_daily %>%
+  select(
+    lag0,
+    lag1, lag2, lag3, lag4, lag5, lag6, lag7,
+    lag8, lag9, lag10, lag11, lag12, lag13, lag14
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Rainfall"
+  ) %>%
+  mutate(
+    Variable = factor(
+      Variable,
+      levels = paste0("lag", 0:14)
+    )
+  )
+
+# STEP 8 — Rainfall Lag Density Distributions
+
+ggplot(
+  rain_density_df,
+  aes(
+    x = Rainfall,
+    fill = Variable,
+    color = Variable
+  )
+) +
+  geom_density(alpha = 0.4) +
+  facet_wrap(
+    ~ Variable, ncol = 4, scales = "free"
+  ) +
+  labs(
+    title = "Density Distributions of Rainfall Lag Variables",
+    x = "Rainfall (mm)",
+    y = "Density"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+```
+
+# 4.1.4
+```{r}
+# =====================================================
+# 4.1.4 Data Matching and Statistical Analysis
+# =====================================================
+
+# STEP 1 — Import Basin Water Quality Dataset
+
+basin_df <- read_excel(
+  "C:/Users/1/Desktop/Basin Klang_Database 2018-2024.xlsx"
+) %>%
+  mutate(
+    Date = as.Date(Date),
+    row_id = row_number()
+  )
+
+# STEP 2 — Define Water Quality Variables
+
+wq_cols <- c(
+  "DO", "PH", "BOD", "COD", "AN", "SS", "WQI"
+)
+
+# STEP 3 — Handle Left-Censored Values (<x)
+
+# Convert "<x" values to 0.5 × x
+basin_df <- basin_df %>%
+  mutate(
+    across(
+      all_of(wq_cols),
+      ~ ifelse(
+        grepl("^<", as.character(.)),
+        as.numeric(sub("<", "", as.character(.))) * 0.5,
+        as.character(.)
+      )
+    )
+  )
+
+# STEP 4 — Convert Water Quality Variables to Numeric Format
+
+basin_df <- basin_df %>%
+  mutate(
+    across(
+      all_of(wq_cols),
+      ~ readr::parse_number(as.character(.))
+    )
+  )
+
+# STEP 5 — Prepare Temperature Features
+
+temp_features <- temp_daily %>%
+  select(
+    Date,
+    Temp_t,
+    TM60
+  )
+
+# STEP 6 — Prepare Rainfall Features
+
+rain_features <- rain_daily %>%
+  select(
+    Date,
+    lag0, lag1, lag2, lag3, lag4,
+    lag5, lag6, lag7, lag8, lag9,
+    lag10, lag11, lag12, lag13, lag14
+  )
+
+# STEP 7 — Merge Water Quality, Temperature, and Rainfall Datasets
+
+final_matched_df <- basin_df %>%
+  left_join(temp_features, by = "Date") %>%
+  left_join(rain_features, by = "Date") %>%
+  arrange(row_id) %>%
+  select(-row_id)
+
+# STEP 8 — Export Final Analytical Dataset
+
+write.csv(
+  final_matched_df,
+  "C:/Users/1/Desktop/Final_Matched_Dataset.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# STEP 9 — WQI Summary Statistics by Monitoring Station
+
+station_wqi_summary <- final_matched_df %>%
+  group_by(Station_ID1) %>%
+  summarise(
+    N = sum(!is.na(WQI)),
+    Mean_WQI = mean(WQI, na.rm = TRUE),
+    SD_WQI = sd(WQI, na.rm = TRUE),
+    Min_WQI = min(WQI, na.rm = TRUE),
+    Median_WQI = median(WQI, na.rm = TRUE),
+    Max_WQI = max(WQI, na.rm = TRUE)
+  ) %>%
+  arrange(desc(Mean_WQI))
+
+station_wqi_summary
+
+write.csv(
+  station_wqi_summary,
+  "C:/Users/1/Desktop/WQI_Summary_By_Station.csv",
+  row.names = FALSE
+)
+
+# STEP 10 — Climate Variable Summary Statistics
+
+climate_summary <- final_matched_df %>%
+  select(
+    Temp_t,
+    TM60,
+    lag0, lag1, lag2, lag3, lag4,
+    lag5, lag6, lag7, lag8, lag9,
+    lag10, lag11, lag12, lag13, lag14
+  ) %>%
+  pivot_longer(
+    everything(),
+    names_to = "Variable",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Variable = factor(
+      Variable,
+      levels = c(
+        "Temp_t",
+        "TM60",
+        paste0("lag", 0:14)
+      )
+    )
+  ) %>%
+  group_by(Variable) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Median = median(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE)
+  ) %>%
+  arrange(Variable)
+
+climate_summary
+
+write.csv(
+  climate_summary,
+  "C:/Users/1/Desktop/Climate_Summary.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 4 — Hydro-meteorological Correlation Structure
+# =====================================================
+
+# STEP 14 — Prepare Hydro-meteorological Variables for Correlation Analysis
+
+vars_fig2 <- final_matched_df %>%
+  select(
+    WQI,
+    lag0, lag1, lag2, lag3, lag4,
+    lag5, lag6, lag7, lag8, lag9,
+    lag10, lag11, lag12, lag13, lag14,
+    Temp_t,
+    TM60
+  )
+
+# STEP 15 — Compute Correlation Matrix
+
+corr_fig2 <- cor(
+  vars_fig2,
+  use = "pairwise.complete.obs"
+)
+
+# STEP 16 — Reshape Correlation Matrix for Visualization
+
+corr_melt <- reshape2::melt(corr_fig2)
+
+# STEP 17 — Plot Hydro-meteorological Correlation Heatmap
+
+ggplot(
+  corr_melt,
+  aes(x = Var1, y = Var2, fill = value)
+) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(label = round(value, 2)),
+    size = 2.5
+  ) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      size = 8
+    )
+  ) +
+  labs(
+    title = "Hydro-meteorological Lag Structure and WQI",
+    x = "",
+    y = ""
+  )
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 5 — WQI Spatial Distribution Across Stations
+# =====================================================
+
+# STEP 18 — WQI Distribution by Monitoring Station
+
+ggplot(
+  final_matched_df,
+  aes(
+    x = reorder(
+      Station_ID1,
+      WQI,
+      median,
+      na.rm = TRUE
+    ),
+    y = WQI
+  )
+) +
+  geom_boxplot() +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "WQI Distribution Across Monitoring Stations",
+    x = "Station",
+    y = "WQI"
+  )
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 6 — WQI Distribution Density
+# =====================================================
+
+# STEP 19 — WQI Density Distribution
+
+ggplot(
+  final_matched_df,
+  aes(x = WQI)
+) +
+  geom_density(
+    fill = "lightblue",
+    alpha = 0.6
+  ) +
+  geom_vline(
+    xintercept = mean(final_matched_df$WQI, na.rm = TRUE),
+    colour = "red",
+    linewidth = 1
+  ) +
+  geom_vline(
+    xintercept = median(final_matched_df$WQI, na.rm = TRUE),
+    colour = "darkgreen",
+    linewidth = 1
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Density Distribution of WQI",
+    x = "WQI",
+    y = "Density"
+  )
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 7 — Water Quality Parameter Correlation Structure
+# =====================================================
+
+# STEP 20 — Prepare Water Quality Variables
+
+water_vars <- final_matched_df %>%
+  select(
+    DO, PH, BOD, COD, AN, SS, WQI
+  )
+
+# STEP 21 — Compute Correlation Matrix
+
+water_cor <- cor(
+  water_vars,
+  use = "pairwise.complete.obs"
+)
+
+# STEP 22 — Reshape Correlation Matrix
+
+water_melt <- reshape2::melt(water_cor)
+
+# STEP 23 — Plot Water Quality Correlation Heatmap
+
+ggplot(
+  water_melt,
+  aes(x = Var1, y = Var2, fill = value)
+) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(label = round(value, 2)),
+    size = 3
+  ) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    title = "Correlation among Water Quality Parameters",
+    x = "",
+    y = ""
+  )
+```
+
+# 4.2
+```{r}
+# =====================================================
+# 4.2 Rainfall Lag Variables Analysis
+# =====================================================
+
+# STEP 1 — Prepare Dataset for Correlation Analysis
+
+lag_corr_data <- final_matched_df %>%
+  select(
+    WQI,
+    lag0, lag1, lag2, lag3, lag4,
+    lag5, lag6, lag7, lag8, lag9,
+    lag10, lag11, lag12, lag13, lag14
+  ) %>%
+  drop_na()
+
+dim(lag_corr_data)
+head(lag_corr_data)
+
+# STEP 2 — Compute Pearson Correlation Matrix
+
+corr_matrix <- cor(
+  lag_corr_data,
+  method = "pearson",
+  use = "complete.obs"
+)
+
+round(corr_matrix, 3)
+
+# STEP 3 — Extract Correlation Between Rainfall Lags and WQI
+
+wqi_corr <- corr_matrix[, "WQI"]
+
+round(wqi_corr, 3)
+
+# STEP 4 — Construct Correlation Summary Table
+
+wqi_corr_df <- data.frame(
+  Variable = names(wqi_corr),
+  Correlation = as.numeric(wqi_corr)
+) %>%
+  filter(
+    Variable != "WQI"
+  ) %>%
+  mutate(
+    Lag_Day = as.numeric(
+      gsub("lag", "", Variable)
+    )
+  ) %>%
+  arrange(Lag_Day)
+
+wqi_corr_df
+```
+
+```{r}
+# STEP 5 — Rank Lag Correlations by Absolute Strength
+
+corr_rank <- wqi_corr_df %>%
+  mutate(
+    Abs_Correlation = abs(Correlation)
+  ) %>%
+  arrange(desc(Abs_Correlation))
+
+corr_rank
+
+write.csv(
+  corr_rank,
+  "C:/Users/1/Desktop/Rainfall_WQI_Correlation_Ranking.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 8 — Lagged Rainfall–WQI Correlation Structure
+# =====================================================
+
+# STEP 6 — Visualize Correlation Across Lag Days
+
+ggplot(
+  wqi_corr_df,
+  aes(
+    x = Lag_Day,
+    y = Correlation
+  )
+) +
+  geom_line(
+    linewidth = 1,
+    colour = "steelblue"
+  ) +
+  geom_point(
+    size = 3,
+    colour = "darkred"
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  scale_x_continuous(
+    breaks = 0:14
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Lagged Rainfall–WQI Correlation Structure",
+    x = "Lag Day",
+    y = "Pearson Correlation"
+  )
+```
+
+```{r}
+# STEP 7 — Prepare Dataset for LOESS Analysis
+
+loess_data <- final_matched_df %>%
+  select(
+    WQI,
+    lag0, lag1, lag2, lag3, lag4,
+    lag5, lag6, lag7, lag8, lag9,
+    lag10, lag11, lag12, lag13, lag14
+  ) %>%
+  pivot_longer(
+    cols = starts_with("lag"),
+    names_to = "Lag_Type",
+    values_to = "Rainfall"
+  ) %>%
+  drop_na()
+
+head(loess_data)
+
+# STEP 8 — Order Lag Variables
+
+loess_data$Lag_Type <- factor(
+  loess_data$Lag_Type,
+  levels = paste0("lag", 0:14)
+)
+
+# STEP 9 — LOESS Response Relationship Visualization
+
+ggplot(
+  loess_data,
+  aes(
+    x = Rainfall,
+    y = WQI
+  )
+) +
+  geom_point(
+    alpha = 0.25,
+    size = 1
+  ) +
+  geom_smooth(
+    method = "loess",
+    se = TRUE,
+    linewidth = 1,
+    colour = "blue"
+  ) +
+  facet_wrap(
+    ~ Lag_Type,
+    scales = "free_x",
+    ncol = 5
+  ) +
+  theme_minimal() +
+  labs(
+    title = "LOESS Response Between Lagged Rainfall and WQI",
+    x = "Rainfall (mm)",
+    y = "WQI"
+  )
+```
+
+# 4.3
+```{r}
+# =====================================================
+# 4.3 Spatial Heterogeneity Analysis
+# =====================================================
+
+# STEP 1 — Filter Monitoring Stations for Spatial Analysis
+
+final_cluster_df <- final_matched_df %>%
+  filter(
+    Station_ID1 %in% selected_stations$Station
+  )
+
+# STEP 2 — Construct Station-level Water Quality Features
+
+cluster_data <- final_cluster_df %>%
+  group_by(Station_ID1) %>%
+  summarise(
+    pH  = mean(PH,  na.rm = TRUE),
+    DO  = mean(DO,  na.rm = TRUE),
+    BOD = mean(BOD, na.rm = TRUE),
+    COD = mean(COD, na.rm = TRUE),
+    AN  = mean(AN,  na.rm = TRUE),
+    SS  = mean(SS,  na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  na.omit()
+
+# STEP 3 — Standardize Water Quality Features
+
+cluster_scaled <- cluster_data %>%
+  select(-Station_ID1) %>%
+  scale()
+
+rownames(cluster_scaled) <- cluster_data$Station_ID1
+
+# STEP 4 — Compute Distance Matrix
+
+dist_mat <- dist(cluster_scaled)
+
+# STEP 5 — Hierarchical Agglomerative Clustering (Ward’s Method)
+
+hc <- hclust(
+  dist_mat, method = "ward.D2"
+)
+
+# STEP 6 — Visualize Dendrogram
+
+plot(
+  hc,
+  main = "Hierarchical Clustering Dendrogram",
+  xlab = "",
+  sub = "",
+  cex = 0.8
+)
+
+# STEP 7 — Silhouette-based Cluster Validation
+
+fviz_nbclust(
+  cluster_scaled, FUN = hcut,
+  method = "silhouette",
+  k.max = 8
+)
+```
+
+```{r}
+# STEP 8 — Assign Cluster Labels
+
+k <- 4
+
+cluster_data$Cluster <- cutree(
+  hc,
+  k = k
+)
+
+# STEP 9 — Merge Spatial Coordinates
+
+station_clustered <- cluster_data %>%
+  left_join(
+    station_loc %>%
+      select(Station, Lat, Lon),
+    by = c("Station_ID1" = "Station")
+  )
+
+# STEP 10 — Construct Final Cluster Table
+
+cluster_table <- station_clustered %>%
+  mutate(
+    Station_No = row_number()
+  ) %>%
+  select(
+    Station_No, Station_ID1, Cluster, Lat, Lon
+  )
+
+cluster_table
+
+# STEP 11 — Export Cluster Table
+
+write.csv(
+  cluster_table,
+  "C:/Users/1/Desktop/1Cluster_Table.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# =====================================================
+# VISUALIZATION 9 — Spatial Distribution of Water Quality Clusters
+# =====================================================
+
+library(leaflet)
+
+df <- read.csv(
+  "C:/Users/1/Desktop/1Cluster_Table.csv",
+  encoding = "UTF-8"
+)
+
+df$Cluster <- as.factor(df$Cluster)
+
+colors <- c("#1E3A8A", "#F97316", "#10B981", "#DC2626")
+pal <- colorFactor(palette = colors, domain = df$Cluster)
+
+leaflet(df) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~Lon,
+    lat = ~Lat,
+    color = ~pal(Cluster),
+    fillColor = ~pal(Cluster),
+    fillOpacity = 0.8,
+    radius = 7,
+    weight = 1,
+    popup = ~paste(
+      "<b>Station ID:</b>", Station_ID1, "<br>",
+      "<b>Cluster:</b>", Cluster
+    )
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = ~Cluster,
+    title = "Cluster",
+    position = "bottomright"
+  )
+```
+
+```{r}
+# STEP 12 — Cluster-wise Water Quality Profile
+
+cluster_summary_raw <- station_clustered %>%
+  group_by(Cluster) %>%
+  summarise(
+    n_station = n(),
+    pH_mean  = mean(pH,  na.rm = TRUE),
+    DO_mean  = mean(DO,  na.rm = TRUE),
+    BOD_mean = mean(BOD, na.rm = TRUE),
+    COD_mean = mean(COD, na.rm = TRUE),
+    AN_mean  = mean(AN,  na.rm = TRUE),
+    SS_mean  = mean(SS,  na.rm = TRUE),
+    organic_load = mean(BOD + COD + AN, na.rm = TRUE),
+    solid_load = mean(SS, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+cluster_summary_raw
+
+# STEP 13 — Export Cluster Profile
+
+write.csv(
+  cluster_summary_raw,
+  "C:/Users/1/Desktop/Cluster_Profile_Raw.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# STEP 14 — Merge WQI with Cluster Labels
+
+df_cluster_wqi <- final_matched_df %>%
+  left_join(
+    cluster_table %>% select(Station_ID1, Cluster),
+    by = "Station_ID1"
+  ) %>%
+  na.omit()
+
+head(df_cluster_wqi)
+
+# STEP 15 — Station-Cluster Mapping Table
+
+station_cluster_table <- cluster_table %>%
+  select(Station_ID1, Cluster) %>%
+  distinct() %>%
+  arrange(Cluster, Station_ID1)
+
+write.csv(
+  station_cluster_table,
+  "C:/Users/1/Desktop/Station_Cluster_Table.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# STEP 16 — Cluster-wise WQI Statistics
+
+cluster_wqi_stats <- df_cluster_wqi %>%
+  group_by(Cluster) %>%
+  summarise(
+    Mean_WQI = mean(WQI, na.rm = TRUE),
+    Median_WQI = median(WQI, na.rm = TRUE),
+    SD_WQI = sd(WQI, na.rm = TRUE),
+    N = n()
+  )
+
+# STEP 17 — Classify Water Quality (DOE Standard)
+
+cluster_wqi_class <- cluster_wqi_stats %>%
+  mutate(
+    DOE_Class = case_when(
+      Mean_WQI >= 92.7 ~ "Class I",
+      Mean_WQI >= 76.5 & Mean_WQI < 92.7 ~ "Class II",
+      Mean_WQI >= 51.9 & Mean_WQI < 76.5 ~ "Class III",
+      Mean_WQI >= 31.0 & Mean_WQI < 51.9 ~ "Class IV",
+      TRUE ~ "Class V"
+    )
+  )
+
+cluster_wqi_class
+```
+
+# 4.4
+```{r}
+# =====================================================
+# 4.4 Machine Learning Model Comparison for WQI Prediction
+# =====================================================
+
+# STEP 1 — Construct Modeling Dataset
+
+model_df <- final_matched_df %>%
+  filter(
+    Station_ID1 %in% selected_stations$Station
+  ) %>%
+  select(
+    WQI,
+    Station_ID1,
+    lag0, lag2, lag3, lag6, lag8, lag10,
+    TM60
+  ) %>%
+  na.omit()
+
+# STEP 2 — Train/Test Split (80/20)
+
+index <- createDataPartition(
+  model_df$WQI, p = 0.8, list = FALSE
+)
+
+train <- model_df[index, ]
+test  <- model_df[-index, ]
+
+dim(train)
+dim(test)
+
+# STEP 3 — Feature Standardization
+
+preproc <- preProcess(
+  train[, -1],
+  method = c("center", "scale")
+)
+
+train_scaled <- predict(preproc, train)
+test_scaled  <- predict(preproc, test)
+
+# STEP 4 — Cross-validation Strategy
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 5
+)
+
+set.seed(246896728)
+```
+
+```{r}
+# STEP 5 — Model Evaluation Metrics
+
+RMSE <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2))
+}
+
+MAE <- function(obs, pred) {
+  mean(abs(obs - pred))
+}
+
+NSE <- function(obs, pred) {
+  1 - sum((obs - pred)^2) /
+    sum((obs - mean(obs))^2)
+}
+
+NMSE <- function(obs, pred) {
+  mean((obs - pred)^2) / var(obs)
+}
+```
+
+```{r}
+# =====================================================
+# STEP 6 — Random Forest Model
+
+rf_model <- train(
+  WQI ~ .,
+  data = train_scaled,
+  method = "rf",
+  trControl = ctrl,
+  tuneGrid = data.frame(mtry = 3),
+  ntree = 200,
+  importance = TRUE
+)
+
+rf_pred <- predict(rf_model, test_scaled)
+
+rf_result <- data.frame(
+  Model = "Random Forest",
+  RMSE = RMSE(test_scaled$WQI, rf_pred),
+  MAE  = MAE(test_scaled$WQI, rf_pred),
+  NSE  = NSE(test_scaled$WQI, rf_pred),
+  NMSE = NMSE(test_scaled$WQI, rf_pred)
+)
+
+rf_result
+```
+
+```{r}
+# =====================================================
+# STEP 7 — Support Vector Regression
+
+svr_model <- train(
+  WQI ~ .,
+  data = train_scaled,
+  method = "svmRadial",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    sigma = 0.05,
+    C = 10
+  )
+)
+
+svr_pred <- predict(svr_model, test_scaled)
+
+svr_result <- data.frame(
+  Model = "SVR",
+  RMSE = RMSE(test_scaled$WQI, svr_pred),
+  MAE  = MAE(test_scaled$WQI, svr_pred),
+  NSE  = NSE(test_scaled$WQI, svr_pred),
+  NMSE = NMSE(test_scaled$WQI, svr_pred)
+)
+
+svr_result
+```
+
+```{r}
+# =====================================================
+# STEP 8 — Artificial Neural Network
+
+ann_model <- train(
+  WQI ~ .,
+  data = train_scaled,
+  method = "nnet",
+  trControl = ctrl,
+  tuneLength = 3,
+  linout = TRUE,
+  trace = FALSE,
+  maxit = 200
+)
+
+ann_pred <- predict(ann_model, test_scaled)
+
+ann_result <- data.frame(
+  Model = "ANN",
+  RMSE = RMSE(test_scaled$WQI, ann_pred),
+  MAE  = MAE(test_scaled$WQI, ann_pred),
+  NSE  = NSE(test_scaled$WQI, ann_pred),
+  NMSE = NMSE(test_scaled$WQI, ann_pred)
+)
+
+ann_result
+```
+
+```{r}
+# =====================================================
+# STEP 9 — Model Performance Comparison
+
+results <- rbind(
+  rf_result,
+  svr_result,
+  ann_result
+)
+
+print(results)
+
+# STEP 10 — Extract Best Hyperparameters
+
+rf_model$bestTune
+svr_model$bestTune
+ann_model$bestTune
+```
+
+# 4.5
+```{r}
+# =====================================================
+# 4.5 SHAP Explainability Analysis for WQI Prediction
+# =====================================================
+
+# STEP 1 — Remove Non-Numeric Identifier Variable
+
+train_scaled <- train_scaled %>%
+  select(-Station_ID1)
+
+test_scaled <- test_scaled %>%
+  select(-Station_ID1)
+
+# STEP 2 — Refit ANN Model for SHAP Analysis
+
+ann_model <- train(
+  WQI ~ .,
+  data = train_scaled,
+  method = "nnet",
+  trControl = ctrl,
+  tuneLength = 3,
+  linout = TRUE,
+  trace = FALSE,
+  maxit = 200
+)
+
+# STEP 3 — Define Feature Matrices for SHAP
+
+X_train <- train_scaled %>% select(-WQI)
+X_test  <- test_scaled %>% select(-WQI)
+
+# STEP 4 — Construct Background Dataset for Kernel SHAP
+
+bg_X <- X_train %>%
+  slice_sample(n = min(200, nrow(X_train)))
+
+# STEP 5 — Compute Kernel SHAP Values
+
+ks <- kernelshap(
+  object = ann_model,
+  X = X_test,
+  bg_X = bg_X
+)
+
+shp <- shapviz(ks)
+```
+
+```{r}
+# =====================================================
+# STEP 6 — Global Feature Importance (SHAP)
+
+p_bar <- sv_importance(
+  shp,
+  kind = "bar"
+) +
+  theme_minimal() +
+  labs(
+    title = "Global SHAP Importance for WQI Prediction"
+  )
+
+print(p_bar)
+
+# STEP 7 — SHAP Beeswarm Plot
+
+p_beeswarm <- sv_importance(
+  shp,
+  kind = "beeswarm"
+) +
+  theme_minimal() +
+  labs(
+    title = "SHAP Beeswarm Plot for WQI Prediction"
+  )
+
+print(p_beeswarm)
+```
+
+```{r}
+# =====================================================
+# STEP 8 — Extract SHAP Values
+
+shap_values <- as.data.frame(ks$S)
+
+head(shap_values)
+
+# STEP 9 — Attach Cluster Labels to Test Data
+
+cluster_test <- test %>%
+  select(Station_ID1) %>%
+  left_join(
+    cluster_table %>%
+      select(Station_ID1, Cluster),
+    by = "Station_ID1"
+  )
+
+head(cluster_test)
+
+# STEP 10 — Merge SHAP Values with Cluster Labels
+
+shap_cluster <- bind_cols(
+  cluster_test,
+  shap_values
+)
+
+head(shap_cluster)
+```
+
+```{r}
+# =====================================================
+# STEP 11 — Compute Mean Absolute SHAP by Cluster
+
+cluster_shap_summary <- shap_cluster %>%
+  group_by(Cluster) %>%
+  summarise(
+    lag0  = mean(abs(lag0)),
+    lag2  = mean(abs(lag2)),
+    lag3  = mean(abs(lag3)),
+    lag6  = mean(abs(lag6)),
+    lag8  = mean(abs(lag8)),
+    lag10 = mean(abs(lag10)),
+    TM60  = mean(abs(TM60))
+  )
+
+cluster_shap_summary
+```
+
+```{r}
+# =====================================================
+# STEP 12 — Cluster-wise SHAP Importance Plot
+
+library(tidyverse)
+
+cluster_shap_long <- cluster_shap_summary %>%
+  pivot_longer(
+    cols = -Cluster,
+    names_to = "Variable",
+    values_to = "SHAP"
+  ) %>%
+  mutate(
+    Variable = factor(
+      Variable,
+      levels = c("lag0", "lag2", "lag3", "lag6", "lag8", "lag10", "TM60")
+    )
+  )
+
+ggplot(
+  cluster_shap_long,
+  aes(
+    x = Variable,
+    y = SHAP,
+    fill = factor(Cluster)
+  )
+) +
+  geom_col(position = "dodge") +
+  theme_minimal() +
+  labs(
+    x = "Variable",
+    y = "Mean Absolute SHAP Value",
+    fill = "Cluster"
+  )
+```
+
+```{r}
+# =====================================================
+# STEP 13 — Identify Dominant Lag per Cluster
+
+cluster_lag_long <- cluster_shap_summary %>%
+  select(
+    Cluster,
+    lag0,
+    lag2,
+    lag3,
+    lag6,
+    lag8,
+    lag10
+  ) %>%
+  pivot_longer(
+    -Cluster,
+    names_to = "Lag",
+    values_to = "SHAP"
+  )
+
+dominant_lag <- cluster_lag_long %>%
+  group_by(Cluster) %>%
+  slice_max(
+    SHAP,
+    n = 1,
+    with_ties = FALSE
+  )
+
+dominant_lag
+```
+
